@@ -5,7 +5,7 @@ type value =
 type interpreter = {
   stack: value list;
   i: value; (* value used in do loops *)
-  memory: (int, value) Hashtbl.t;
+  memory: value array;
   has_printed: bool (* flag set by the interpreter to make writing interfaces easier *)
 }
 
@@ -13,7 +13,7 @@ type interpreter_error =
   | StackUnderflow
   | TypeError of value
   | Break of interpreter
-  | InaccessibleDereference
+  | InvalidDereference
   | Unreachable (* If this error is instanced, that means there is a bug *)
 
 type word = (* All of the language constructs *)
@@ -52,6 +52,9 @@ type parser = {
   words: (string, word list) Hashtbl.t
 }
 
+(* copy the data from a1 to a2 in-place. if a2 is smaller than a1, then only copy the first elements of a1 *)
+let arrcpy a1 a2 = Array.iteri (fun n v -> if n < (Array.length a2) then a2.(n) <- v) a1
+
 let getchar () =
     let termio = Unix.tcgetattr Unix.stdin in
     termio.c_echo <- false;
@@ -89,7 +92,7 @@ let string_of_interpreter_error = function
 | StackUnderflow -> "StackUnderflow"
 | TypeError _ -> "TypeError"
 | Break _ -> "MisplacedBreak"
-| InaccessibleDereference -> "InaccessibleDereference"
+| InvalidDereference -> "InvalidDereference"
 | Unreachable -> "Unreachable"
 
 (* helper value functions *)
@@ -254,24 +257,35 @@ let builtin_of_string string =
   (* dereference pointer (address -- val) *)
   | "@" -> Some (Builtin (fun i -> match pop i with
     | Ok (v, i) -> (match v with
-      | Int n -> (match Hashtbl.find_opt i.memory n with
-        | Some v -> Ok (push i v)
-        | None -> Error InaccessibleDereference)
+      | Int addr -> if addr >= (Array.length i.memory) 
+        then Error InvalidDereference 
+        else Ok (push i i.memory.(addr))
       | Float _ -> Error (TypeError v))
     | Error e -> Error e))
   (* store value at pointer (val address --) *)
   | "!" -> Some (Builtin (fun i -> match pop i with
     | Ok (v, i) -> (match v with
       | Int addr -> (match pop i with
-        | Ok (v, i) -> Hashtbl.add i.memory addr v; Ok i
+        | Ok (v, i) -> if addr >= (Array.length i.memory) 
+          then Error InvalidDereference 
+          else (i.memory.(addr) <- v; Ok i)
         | Error e -> Error e)
       | Float _ -> Error (TypeError v))
     | Error e -> Error e))
-  (* because memory is stored in a hashtable, and all of the hard work is done for us, we really 
+  (* because memory is stored in an array, and all of the hard work is done for us, we really 
   don't need to worry about the size of values. *)
   | "cells" -> Some (Builtin (fun i -> Ok (push i (Int 1))))
-  (* allocating memory is a no-op because of hashtables *)
-  | "allot" -> Some (Builtin (fun i -> Ok i))
+  (* adjust the size of the memory array based on the value on the stack *)
+  | "allot" -> Some (Builtin (fun i -> match pop i with
+    | Ok (v, i) -> (match v with
+      | Int n -> (if n = 0 then Ok i else
+        let newarr = Array.make ((Array.length i.memory) + n) (Int 0) in
+        arrcpy i.memory newarr;
+        Ok { stack = i.stack; i = i.i; memory = newarr; has_printed = i.has_printed; }
+      )
+      | Float _ -> Error (TypeError v))
+    | Error e -> Error e
+  ))
   | _ -> None
 
 (* parse a string. may result in a word or just a state change *)
@@ -430,5 +444,5 @@ let rec main parser interpreter =
 
 let () =
   let parser = { comment_count = 0; state = []; words = Hashtbl.create 5 } in
-  let interpreter = { stack = []; i = Int 1; memory = Hashtbl.create 5; has_printed = false } in
+  let interpreter = { stack = []; i = Int 1; memory = [||]; has_printed = false } in
   main parser interpreter
