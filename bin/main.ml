@@ -6,7 +6,7 @@ type interpreter = {
   stack: value list;
   i: value; (* value used in do loops *)
   memory: value array;
-  has_printed: bool (* flag set by the interpreter to make writing interfaces easier *)
+  has_printed: bool; (* flag set by the interpreter to make writing interfaces easier *)
 }
 
 type interpreter_error =
@@ -32,6 +32,7 @@ type parser_state =
   | IfThen of word list
   | IfElseThen of word list * word list
   | String of string list
+  | VariableDeclaration
 
 type parser_error =
   | MisplacedCommentClose
@@ -44,16 +45,23 @@ type parser_error =
   | MisplacedElse
   | UnnamedWordDefinition
   | UnknownWord of string
+  | MisplacedVariableDeclaration
   | Unreachable
 
 type parser = {
   comment_count: int;
   state: parser_state list;
-  words: (string, word list) Hashtbl.t
+  words: (string, word list) Hashtbl.t;
+  memory_count: int (* the counter that tells us where to place new variables *)
 }
 
-(* copy the data from a1 to a2 in-place. if a2 is smaller than a1, then only copy the first elements of a1 *)
-let arrcpy a1 a2 = Array.iteri (fun n v -> if n < (Array.length a2) then a2.(n) <- v) a1
+
+(* creates a new array of `length` and copies the elements from arr. returns said new array *)
+let adjust_arr arr length v = 
+  if length = (Array.length arr) then arr else 
+    let newarr = Array.make length v in 
+    Array.iteri (fun n v -> if n < length then newarr.(n) <- v) arr;
+    newarr
 
 let getchar () =
     let termio = Unix.tcgetattr Unix.stdin in
@@ -85,6 +93,7 @@ let string_of_parser_error = function
 | MisplacedThen -> "MisplacedThen"
 | MisplacedElse -> "MisplacedElse"
 | UnnamedWordDefinition -> "UnnamedWordDefinition"
+| MisplacedVariableDeclaration -> "MisplacedVariableDeclaration"
 | UnknownWord word -> "UnknownWord " ^ word
 | Unreachable -> "Unreachable"
 
@@ -131,7 +140,7 @@ let greater_than v1 v2 = not (less_than_equal v1 v2)
 let greater_than_equal v1 v2 = not (less_than v1 v2)
 
 (* stack management *)
-let push interpreter v = { stack = v :: interpreter.stack; i = interpreter.i; memory = interpreter.memory; has_printed = interpreter.has_printed }
+let push interpreter v = { interpreter with stack = v :: interpreter.stack }
 
 let rec pushs interpreter = function
 | [] -> interpreter
@@ -140,7 +149,7 @@ let rec pushs interpreter = function
 let pop interpreter =
   match interpreter.stack with
   | [] -> Error StackUnderflow
-  | v :: stack -> Ok (v, { stack = stack; i = interpreter.i; memory = interpreter.memory; has_printed = interpreter.has_printed })
+  | v :: stack -> Ok (v, { interpreter with stack = stack; })
 
 let pop_n interpreter n =
   let rec aux acc interpreter = function
@@ -153,7 +162,7 @@ let pop_n interpreter n =
 
 (* interpreter.has_printed *)
 let set_has_printed interpreter value =
-  { stack = interpreter.stack; i = interpreter.i; memory = interpreter.memory; has_printed = value }
+  { interpreter with has_printed = value }
 
 (* Split a string by whitespace *)
 let split_string s = 
@@ -278,11 +287,7 @@ let builtin_of_string string =
   (* adjust the size of the memory array based on the value on the stack *)
   | "allot" -> Some (Builtin (fun i -> match pop i with
     | Ok (v, i) -> (match v with
-      | Int n -> (if n = 0 then Ok i else
-        let newarr = Array.make ((Array.length i.memory) + n) (Int 0) in
-        arrcpy i.memory newarr;
-        Ok { stack = i.stack; i = i.i; memory = newarr; has_printed = i.has_printed; }
-      )
+      | Int n -> Ok { i with memory = adjust_arr i.memory ((Array.length i.memory) + n) (Int 0) }
       | Float _ -> Error (TypeError v))
     | Error e -> Error e
   ))
@@ -293,66 +298,73 @@ let parse parser word =
   let cc = parser.comment_count in
   let state = parser.state in
   let words = parser.words in
+  let memory_count = parser.memory_count in
   let append_word ?s word = 
     let state = match s with
       | Some s -> s
       | None -> state
     in
     match state with
-      | [] -> Ok ({ comment_count = cc; state = state; words = words }, Some word)
+      | [] -> Ok (parser, Some word)
       | WordDefinition (name, ws) :: state -> (match name with (* Extend the word definition *)
-        | Some _ -> Ok ({ comment_count = cc; state = (WordDefinition (name, word :: ws)) :: state; words = words }, None)
+        | Some _ -> Ok ({ parser with state = (WordDefinition (name, word :: ws)) :: state }, None)
         | None -> Error UnnamedWordDefinition)
-      | (DoLoop ws) :: state -> Ok ({ comment_count = cc; state = ((DoLoop (word :: ws)) :: state); words = words}, None)
-      | (BeginUntilLoop ws) :: state -> Ok ({ comment_count = cc; state = ((BeginUntilLoop (word :: ws)) :: state); words = words}, None)
-      | (IfThen ws) :: state -> Ok ({ comment_count = cc; state = ((IfThen (word :: ws)) :: state); words = words}, None)
-      | (IfElseThen (tws, fws)) :: state -> Ok ({ comment_count = cc; state = ((IfElseThen (tws, (word :: fws))) :: state); words = words}, None)
-      | String _ :: _ -> Error Unreachable
+      | (DoLoop ws) :: state -> Ok ({ parser with state = ((DoLoop (word :: ws)) :: state) }, None)
+      | (BeginUntilLoop ws) :: state -> Ok ({ parser with state = ((BeginUntilLoop (word :: ws)) :: state) }, None)
+      | (IfThen ws) :: state -> Ok ({ parser with state = ((IfThen (word :: ws)) :: state) }, None)
+      | (IfElseThen (tws, fws)) :: state -> Ok ({ parser with state = ((IfElseThen (tws, (word :: fws))) :: state) }, None)
+      | String _ :: _ | VariableDeclaration :: _ -> Error Unreachable
   in
   if (cc != 0) then (* handle comments *)
     match word with
-    | "(" -> Ok ({ comment_count = cc + 1; state = state; words = words }, None)
-    | ")" -> Ok ({ comment_count = cc - 1; state = state; words = words }, None)
+    | "(" -> Ok ({ parser with comment_count = cc + 1; }, None)
+    | ")" -> Ok ({ parser with comment_count = cc - 1;  }, None)
     | _ -> Ok (parser, None)
   else match state with
     (* while constructing a string, append a new word to the string, or catch the end of the string *)
     | String ss :: state -> if (String.ends_with ~suffix:"\"" word)
       then let s = string_of_string_list (List.rev ((String.sub word 0 ((String.length word) - 1)) :: ss)) in
         append_word ~s:state (Builtin (fun i -> print_string s; flush stdout; Ok (set_has_printed i true)))
-      else Ok ({ comment_count = cc; state = (String (word :: ss)) :: state; words = words }, None)
+      else Ok ({ parser with state = (String (word :: ss)) :: state }, None)
     | _ -> 
       match word with
       | "" -> Ok (parser, None)
-      | "(" -> Ok ({ comment_count = cc + 1; state = state; words = words }, None)
+      | "(" -> Ok ({ parser with comment_count = cc + 1 }, None)
       | ")" -> Error MisplacedCommentClose
       | ":" -> if (state = []) (* word definitions can only happen on the top level *)
-        then Ok ({ comment_count = cc; state = [WordDefinition (None, [])]; words = words }, None)
+        then Ok ({ parser with state = [WordDefinition (None, [])] }, None)
         else Error MisplacedWordDefinition
       | ";" -> (match state with (* word definitions only end at the very end *)
-        | [WordDefinition (Some name, ws)] -> Hashtbl.add words name (List.rev ws); Ok ({ comment_count = cc; state = []; words = words }, None)
+        | [WordDefinition (Some name, ws)] -> Hashtbl.add words name (List.rev ws); Ok ({ parser with state = [] }, None)
         | _ -> Error MisplacedWordDefinitionClose)
-      | ".\"" -> Ok ({ comment_count = cc; state = String [] :: state; words = words }, None)
+      | ".\"" -> Ok ({ parser with state = String [] :: state }, None)
       | "\"" -> Error MisplacedStringClose (* string state is handled above *)
-      | "do" -> Ok ({ comment_count = cc; state = (DoLoop []) :: state; words = words }, None)
+      | "do" -> Ok ({ parser with state = (DoLoop []) :: state }, None)
       | "loop" -> (match state with
         | (DoLoop ws) :: state -> append_word ~s:state (DoLoop (List.rev ws))
         | _ -> Error MisplacedLoop)
-      | "begin" -> Ok ({ comment_count = cc; state = (BeginUntilLoop []) :: state; words = words }, None)
+      | "begin" -> Ok ({ parser with state = (BeginUntilLoop []) :: state }, None)
       | "until" -> (match state with
         | (BeginUntilLoop ws) :: state -> append_word ~s:state (BeginUntilLoop (List.rev ws))
         | _ -> Error MisplacedUntil)
-      | "if" -> Ok ({ comment_count = cc; state = (IfThen []) :: state; words = words }, None)
+      | "if" -> Ok ({ parser with state = (IfThen []) :: state }, None)
       | "else" -> (match state with
-        | (IfThen ws) :: state -> Ok ({ comment_count = cc; state = (IfElseThen (ws, [])) :: state; words = words }, None)
+        | (IfThen ws) :: state -> Ok ({ parser with state = (IfElseThen (ws, [])) :: state }, None)
         | _ -> Error MisplacedElse
       )
       | "then" -> (match state with
         | (IfThen ws) :: state -> append_word ~s:state (IfThen (List.rev ws))
         | (IfElseThen (tws, fws)) :: state -> append_word ~s:state (IfElseThen (List.rev tws, List.rev fws))
         | _ -> Error MisplacedThen)
+      | "variable" -> (match state with
+        | [] -> Ok ({ parser with state = [VariableDeclaration] }, None)
+        | _ -> Error MisplacedVariableDeclaration)
       | _ -> (* Generate a word from a string *)
         match state with (* Set the name of the word if it is unnamed *)
-        | (WordDefinition (None, [])) :: state -> Ok ({ comment_count = cc; state = ((WordDefinition (Some word, [])) :: state); words = words }, None)
+        | (WordDefinition (None, [])) :: state -> Ok ({ parser with state = ((WordDefinition (Some word, [])) :: state) }, None)
+        | [VariableDeclaration] -> 
+          Hashtbl.add words word [(Builtin (fun i -> Ok (push i (Int memory_count))))]; 
+          Ok ({ parser with state = []; memory_count = memory_count + 1 }, None)
         | _ -> match int_of_string_opt word with (* handle int *)
           | Some i -> append_word (Value (Int i))
           | None -> match float_of_string_opt word with (* handle float *)
@@ -393,7 +405,7 @@ and interpret_do_loop interpreter words =
   let rec aux low high interpreter words =
     if (low = high) then Ok interpreter
     else
-      match interpret_words ({ stack = interpreter.stack; i = Int low; memory = interpreter.memory; has_printed = interpreter.has_printed }) words with
+      match interpret_words ({ interpreter with i = Int low }) words with
       | Ok i -> aux (low + 1) high i words
       | Error Break i -> Ok i
       | Error e -> Error e
@@ -435,14 +447,18 @@ let rec main parser interpreter =
   then print_string ">>> "
   else print_string "(comment)>> ";
   let line = read_line () in
-  (match parse_words parser (split_string line) with
-  | Ok (parser, words) -> (match interpret_words interpreter words with
-    | Ok interpreter -> continue parser interpreter (* If everything is OK, we'll end up here *)
-    | Error e -> print_string (string_of_interpreter_error e))
+  (* it's our job as the top level to keep the memory counts in sync between the parser and the interpreter *)
+  (match parse_words { parser with memory_count = Array.length interpreter.memory } (split_string line) with
+  | Ok (parser, words) -> 
+    (* it's our job as the top level to keep the memory counts in sync between the parser and the interpreter *)
+    let interpreter = { interpreter with memory = adjust_arr interpreter.memory parser.memory_count (Int 0) } in
+      (match interpret_words interpreter words with
+      | Ok interpreter -> continue parser interpreter (* If everything is OK, we'll end up here *)
+      | Error e -> print_string (string_of_interpreter_error e))
   | Error e -> print_string (string_of_parser_error e));
   continue parser (set_has_printed interpreter true) (* If we error, we will end up here *)
 
 let () =
-  let parser = { comment_count = 0; state = []; words = Hashtbl.create 5 } in
+  let parser = { comment_count = 0; state = []; words = Hashtbl.create 5; memory_count = 0 } in
   let interpreter = { stack = []; i = Int 1; memory = [||]; has_printed = false } in
   main parser interpreter
