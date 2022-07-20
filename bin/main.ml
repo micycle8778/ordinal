@@ -6,7 +6,7 @@ type interpreter = {
   stack: value list;
   i: value; (* value used in do loops *)
   memory: (int, value) Hashtbl.t;
-  has_printed: bool
+  has_printed: bool (* flag set by the interpreter to make writing interfaces easier *)
 }
 
 type interpreter_error =
@@ -82,7 +82,7 @@ let string_of_parser_error = function
 | MisplacedThen -> "MisplacedThen"
 | MisplacedElse -> "MisplacedElse"
 | UnnamedWordDefinition -> "UnnamedWordDefinition"
-| UnknownWord _ -> "UnknownWord"
+| UnknownWord word -> "UnknownWord " ^ word
 | Unreachable -> "Unreachable"
 
 let string_of_interpreter_error = function
@@ -426,7 +426,7 @@ let rec main parser interpreter =
     | Ok interpreter -> continue parser interpreter (* If everything is OK, we'll end up here *)
     | Error e -> print_string (string_of_interpreter_error e))
   | Error e -> print_string (string_of_parser_error e));
-  continue parser interpreter (* If we error, we will end up here *)
+  continue parser (set_has_printed interpreter true) (* If we error, we will end up here *)
 
 let () =
   let parser = { comment_count = 0; state = []; words = Hashtbl.create 5 } in
