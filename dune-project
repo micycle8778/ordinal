@@ -1,6 +1,6 @@
 (lang dune 3.3)
 (name ordinal)
-(version 1.0)
+(version 1.1)
 
 (generate_opam_files true)
 
