@@ -8,6 +8,7 @@
  (github RainbowAsteroids/ordinal))
 
 (authors "Rainbow Asteroids")
+(maintainers "rainbow@portal2d.xyz")
 
 (license MIT)
 
