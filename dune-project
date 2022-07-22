@@ -16,6 +16,7 @@
  (name ordinal)
  (synopsis "A language interpreter based on the Forth language")
  (description "A language interpreter based on the Forth language")
- (depends ocaml dune unix))
+ (depends 
+    (ocaml (>= 4.13)) dune))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
